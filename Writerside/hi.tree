@@ -19,6 +19,11 @@
         </toc-element>
         <toc-element topic="应用软件.md"/>
     </toc-element>
+    <toc-element topic="计算机网络与安全.md"/>
     <toc-element topic="硬件系统.md"/>
-    <toc-element topic="Reference.md"/>
+    <toc-element topic="数据科学与分析.md"/>
+    <toc-element topic="人工智能.md"/>
+    <toc-element topic="语言.md">
+        <toc-element topic="汇编.md"/>
+    </toc-element>
 </instance-profile>
