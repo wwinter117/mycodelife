@@ -2,7 +2,10 @@
 
 ## 00-Bootstrap
 
-硬件信息: 定义了8核心的cpu
+本节主要实现启动操作系统内核的启动程序，为了简化，目前只是跑单核，让第0个核心cpu跳到内核第一行代码开始运行，其他核心进入休眠状态
+
+**platform.h**
+定义硬件信息: 最多支持8核心的cpu
 
 ```C
 #ifndef __PLATFORM_H__
@@ -22,10 +25,12 @@
 #endif /* __PLATFORM_H__ */
 ```
 
-启动bios, 每个核心运行bios代码时，先判断其是否是第0个核心，如果是则跳进内核代码，否则空转，达到
-单核心运行操作系统的目的
+**start.S**
+启动bios，每个核心运行bios代码时，先判断其是否是第0个核心，如果是则跳进内核代码，否则让其进入等待中断的休眠状态，达到单核心运行操作系统的目的
 
-```C
+bios给系统内核分配了8k字节的栈空间，并且按照16字节对齐以符合riscv的调用约定，分配给每个核心的栈空间大小是1024字节
+
+```shell
 #include "platform.h"
 
 	# size of each hart's stack is 1024 bytes
@@ -63,6 +68,7 @@ stacks:
 	.end				# End of file
 ```
 
+**Kernel.c**
 内核：暂时让其空转
 
 ```C
@@ -71,4 +77,45 @@ void start_kernel(void)
 	while (1) {}; // stop here!
 }
 ```
+
+
+至此达到了让第0个核心cpu运行操作系统内核代码的目的
+
+# 01-helloRVOS
+
+本节主要配置串口设备以方便调试内核，最终在窗口中打印出字符
+
+
+**platform.h**
+
+```C 
+
+#ifndef __PLATFORM_H__
+#define __PLATFORM_H__
+
+/*
+ * QEMU RISC-V Virt machine with 16550a UART and VirtIO MMIO
+ */
+
+/*
+ * maximum number of CPUs
+ * see https://github.com/qemu/qemu/blob/master/include/hw/riscv/virt.h
+ * #define VIRT_CPUS_MAX 8
+ */
+#define MAXNUM_CPU 8
+
+/*
+ * MemoryMap
+ * see https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c, virt_memmap[]
+ * 0x00001000 -- boot ROM, provided by qemu
+ * 0x02000000 -- CLINT
+ * 0x0C000000 -- PLIC
+ * 0x10000000 -- UART0
+ * 0x10001000 -- virtio disk
+ * 0x80000000 -- boot ROM jumps here in machine mode, where we load our kernel
+ */
+
+/* This machine puts UART registers here in physical memory. */
+#define UART0 0x10000000L
+#endif /* __PLATFORM_H__ */```
 
