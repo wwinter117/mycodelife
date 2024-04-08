@@ -992,3 +992,268 @@ void page_test()
 	printf("p3 = %p\n", p3);
 }
 ```
+
+运行以上page_test():
+
+```Shell
+zhangdongdong:02-memanagement/ (main✗) $ make run                                      [20:13:21]
+Press Ctrl-A and then X to exit QEMU
+------------------------------------
+Hello, RVOS!
+HEAP_START = 800033f4, HEAP_SIZE = 07ffcc0c, num of pages = 32756
+TEXT:   0x80000000 -> 0x80002d0c
+RODATA: 0x80002d0c -> 0x80002e9b
+DATA:   0x80003000 -> 0x80003000
+BSS:    0x80003000 -> 0x800033f4
+HEAP:   0x8000c000 -> 0x88000000
+p = 0x8000c000
+p2 = 0x8000e000
+p3 = 0x8000e000
+QEMU: Terminated
+```
+
+
+### 03-contextswitch
+
+本节实现多任务处理
+
+**定义上下文**
+
+数据结构如下：
+
+每个任务的上下文就是存在寄存器中的内容，当切换切换任务运行时，需要保存当前任务的上下文内容，
+并且恢复将要运行的任务的上下文
+
+```C
+/* task management */
+struct context {
+	/* ignore x0 */
+	reg_t ra;
+	reg_t sp;
+	reg_t gp;
+	reg_t tp;
+	reg_t t0;
+	reg_t t1;
+	reg_t t2;
+	reg_t s0;
+	reg_t s1;
+	reg_t a0;
+	reg_t a1;
+	reg_t a2;
+	reg_t a3;
+	reg_t a4;
+	reg_t a5;
+	reg_t a6;
+	reg_t a7;
+	reg_t s2;
+	reg_t s3;
+	reg_t s4;
+	reg_t s5;
+	reg_t s6;
+	reg_t s7;
+	reg_t s8;
+	reg_t s9;
+	reg_t s10;
+	reg_t s11;
+	reg_t t3;
+	reg_t t4;
+	reg_t t5;
+	reg_t t6;
+};
+```
+
+**sched.c**
+
+实现调度初始化：
+
+将0写入mscratch寄存器
+
+
+
+```C
+#include "os.h"
+
+/* defined in entry.S */
+extern void switch_to(struct context *next);
+
+#define STACK_SIZE 1024
+/*
+ * In the standard RISC-V calling convention, the stack pointer sp
+ * is always 16-byte aligned.
+ */
+uint8_t __attribute__((aligned(16))) task_stack[STACK_SIZE];
+struct context ctx_task;
+
+static void w_mscratch(reg_t x)
+{
+	asm volatile("csrw mscratch, %0" : : "r" (x));
+}
+
+void user_task0(void);
+void sched_init()
+{
+	w_mscratch(0);
+
+	ctx_task.sp = (reg_t) &task_stack[STACK_SIZE];
+	ctx_task.ra = (reg_t) user_task0;
+}
+
+void schedule()
+{
+	struct context *next = &ctx_task;
+	switch_to(next);
+}
+
+/*
+ * a very rough implementaion, just to consume the cpu
+ */
+void task_delay(volatile int count)
+{
+	count *= 50000;
+	while (count--);
+}
+
+
+void user_task0(void)
+{
+	uart_puts("Task 0: Created!\n");
+	while (1) {
+		uart_puts("Task 0: Running...\n");
+		task_delay(1000);
+	}
+}
+```
+
+**entry.s**
+
+其中定义了保存上下文(`reg_save`)和恢复上下文(`reg_restore`)的宏
+
+
+```C
+# Save all General-Purpose(GP) registers to context.
+# struct context *base = &ctx_task;
+# base->ra = ra;
+# ......
+# These GP registers to be saved don't include gp
+# and tp, because they are not caller-saved or
+# callee-saved. These two registers are often used
+# for special purpose. For example, in RVOS, 'tp'
+# (aka "thread pointer") is used to store hartid,
+# which is a global value and would not be changed
+# during context-switch.
+.macro reg_save base
+	sw ra, 0(\base)
+	sw sp, 4(\base)
+	sw t0, 16(\base)
+	sw t1, 20(\base)
+	sw t2, 24(\base)
+	sw s0, 28(\base)
+	sw s1, 32(\base)
+	sw a0, 36(\base)
+	sw a1, 40(\base)
+	sw a2, 44(\base)
+	sw a3, 48(\base)
+	sw a4, 52(\base)
+	sw a5, 56(\base)
+	sw a6, 60(\base)
+	sw a7, 64(\base)
+	sw s2, 68(\base)
+	sw s3, 72(\base)
+	sw s4, 76(\base)
+	sw s5, 80(\base)
+	sw s6, 84(\base)
+	sw s7, 88(\base)
+	sw s8, 92(\base)
+	sw s9, 96(\base)
+	sw s10, 100(\base)
+	sw s11, 104(\base)
+	sw t3, 108(\base)
+	sw t4, 112(\base)
+	sw t5, 116(\base)
+	# we don't save t6 here, due to we have used
+	# it as base, we have to save t6 in an extra step
+	# outside of reg_save
+.endm
+
+# restore all General-Purpose(GP) registers from the context
+# except gp & tp.
+# struct context *base = &ctx_task;
+# ra = base->ra;
+# ......
+.macro reg_restore base
+	lw ra, 0(\base)
+	lw sp, 4(\base)
+	lw t0, 16(\base)
+	lw t1, 20(\base)
+	lw t2, 24(\base)
+	lw s0, 28(\base)
+	lw s1, 32(\base)
+	lw a0, 36(\base)
+	lw a1, 40(\base)
+	lw a2, 44(\base)
+	lw a3, 48(\base)
+	lw a4, 52(\base)
+	lw a5, 56(\base)
+	lw a6, 60(\base)
+	lw a7, 64(\base)
+	lw s2, 68(\base)
+	lw s3, 72(\base)
+	lw s4, 76(\base)
+	lw s5, 80(\base)
+	lw s6, 84(\base)
+	lw s7, 88(\base)
+	lw s8, 92(\base)
+	lw s9, 96(\base)
+	lw s10, 100(\base)
+	lw s11, 104(\base)
+	lw t3, 108(\base)
+	lw t4, 112(\base)
+	lw t5, 116(\base)
+	lw t6, 120(\base)
+.endm
+
+# Something to note about save/restore:
+# - We use mscratch to hold a pointer to context of current task
+# - We use t6 as the 'base' for reg_save/reg_restore, because it is the
+#   very bottom register (x31) and would not be overwritten during loading.
+#   Note: CSRs(mscratch) can not be used as 'base' due to load/restore
+#   instruction only accept general purpose registers.
+
+.text
+
+# void switch_to(struct context *next);
+# a0: pointer to the context of the next task
+.globl switch_to
+.balign 4
+switch_to:
+	csrrw	t6, mscratch, t6	# swap t6 and mscratch
+	beqz	t6, 1f			# Note: the first time switch_to() is
+	                                # called, mscratch is initialized as zero
+					# (in sched_init()), which makes t6 zero,
+					# and that's the special case we have to
+					# handle with t6
+	reg_save t6			# save context of prev task
+
+	# Save the actual t6 register, which we swapped into
+	# mscratch
+	mv	t5, t6		# t5 points to the context of current task
+	csrr	t6, mscratch	# read t6 back from mscratch
+	sw	t6, 120(t5)	# save t6 with t5 as base
+
+1:
+	# switch mscratch to point to the context of the next task
+	csrw	mscratch, a0
+
+	# Restore all GP registers
+	# Use t6 to point to the context of the new task
+	mv	t6, a0
+	reg_restore t6
+
+	# Do actual context switching.
+	ret
+
+.end
+```
+
+
+
