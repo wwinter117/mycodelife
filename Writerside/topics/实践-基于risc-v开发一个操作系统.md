@@ -88,6 +88,8 @@ void start_kernel(void)
 
 **platform.h**
 
+定义了qemu中UART串口设备的起始地址
+
 ```C 
 #ifndef __PLATFORM_H__
 #define __PLATFORM_H__
@@ -119,3 +121,874 @@ void start_kernel(void)
 #endif /* __PLATFORM_H__ */ 
 ```
 
+**types.h**
+
+```C
+#ifndef __TYPES_H__
+#define __TYPES_H__
+
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int  uint32_t;
+typedef unsigned long long uint64_t;
+
+#endif /* __TYPES_H__ */
+```
+
+**uart.c**
+
+uart驱动程序
+
+```C
+#include "types.h"
+#include "platform.h"
+
+/*
+ * The UART control registers are memory-mapped at address UART0. 
+ * This macro returns the address of one of the registers.
+ */
+#define UART_REG(reg) ((volatile uint8_t *)(UART0 + reg))
+
+/*
+ * Reference
+ * [1]: TECHNICAL DATA ON 16550, http://byterunner.com/16550.html
+ */
+
+/*
+ * UART control registers map. see [1] "PROGRAMMING TABLE"
+ * note some are reused by multiple functions
+ * 0 (write mode): THR/DLL
+ * 1 (write mode): IER/DLM
+ */
+#define RHR 0	// Receive Holding Register (read mode)
+#define THR 0	// Transmit Holding Register (write mode)
+#define DLL 0	// LSB of Divisor Latch (write mode)
+#define IER 1	// Interrupt Enable Register (write mode)
+#define DLM 1	// MSB of Divisor Latch (write mode)
+#define FCR 2	// FIFO Control Register (write mode)
+#define ISR 2	// Interrupt Status Register (read mode)
+#define LCR 3	// Line Control Register
+#define MCR 4	// Modem Control Register
+#define LSR 5	// Line Status Register
+#define MSR 6	// Modem Status Register
+#define SPR 7	// ScratchPad Register
+
+/*
+ * POWER UP DEFAULTS
+ * IER = 0: TX/RX holding register interrupts are both disabled
+ * ISR = 1: no interrupt penting
+ * LCR = 0
+ * MCR = 0
+ * LSR = 60 HEX
+ * MSR = BITS 0-3 = 0, BITS 4-7 = inputs
+ * FCR = 0
+ * TX = High
+ * OP1 = High
+ * OP2 = High
+ * RTS = High
+ * DTR = High
+ * RXRDY = High
+ * TXRDY = Low
+ * INT = Low
+ */
+
+/*
+ * LINE STATUS REGISTER (LSR)
+ * LSR BIT 0:
+ * 0 = no data in receive holding register or FIFO.
+ * 1 = data has been receive and saved in the receive holding register or FIFO.
+ * ......
+ * LSR BIT 5:
+ * 0 = transmit holding register is full. 16550 will not accept any data for transmission.
+ * 1 = transmitter hold register (or FIFO) is empty. CPU can load the next character.
+ * ......
+ */
+#define LSR_RX_READY (1 << 0)
+#define LSR_TX_IDLE  (1 << 5)
+
+#define uart_read_reg(reg) (*(UART_REG(reg)))
+#define uart_write_reg(reg, v) (*(UART_REG(reg)) = (v))
+
+void uart_init()
+{
+	/* disable interrupts. */
+	uart_write_reg(IER, 0x00);
+
+	/*
+	 * Setting baud rate. Just a demo here if we care about the divisor,
+	 * but for our purpose [QEMU-virt], this doesn't really do anything.
+	 *
+	 * Notice that the divisor register DLL (divisor latch least) and DLM (divisor
+	 * latch most) have the same base address as the receiver/transmitter and the
+	 * interrupt enable register. To change what the base address points to, we
+	 * open the "divisor latch" by writing 1 into the Divisor Latch Access Bit
+	 * (DLAB), which is bit index 7 of the Line Control Register (LCR).
+	 *
+	 * Regarding the baud rate value, see [1] "BAUD RATE GENERATOR PROGRAMMING TABLE".
+	 * We use 38.4K when 1.8432 MHZ crystal, so the corresponding value is 3.
+	 * And due to the divisor register is two bytes (16 bits), so we need to
+	 * split the value of 3(0x0003) into two bytes, DLL stores the low byte,
+	 * DLM stores the high byte.
+	 */
+	uint8_t lcr = uart_read_reg(LCR);
+	uart_write_reg(LCR, lcr | (1 << 7));
+	uart_write_reg(DLL, 0x03);
+	uart_write_reg(DLM, 0x00);
+
+	/*
+	 * Continue setting the asynchronous data communication format.
+	 * - number of the word length: 8 bits
+	 * - number of stop bits：1 bit when word length is 8 bits
+	 * - no parity
+	 * - no break control
+	 * - disabled baud latch
+	 */
+	lcr = 0;
+	uart_write_reg(LCR, lcr | (3 << 0));
+}
+
+int uart_putc(char ch)
+{
+	while ((uart_read_reg(LSR) & LSR_TX_IDLE) == 0);
+	return uart_write_reg(THR, ch);
+}
+
+void uart_puts(char *s)
+{
+	while (*s) {
+		uart_putc(*s++);
+	}
+}
+```
+
+**kernel.c**
+
+```C
+extern void uart_init(void);
+extern void uart_puts(char *s);
+
+void start_kernel(void)
+{
+	uart_init();
+	uart_puts("Hello, RVOS!\n");
+
+	while (1) {}; // stop here!
+}
+```
+
+### 代码整理
+
+添加一个printf函数，为接下来的章节作准备
+
+**os.h**
+
+rvos头文件
+
+```C
+#ifndef __OS_H__
+#define __OS_H__
+
+#include "types.h"
+#include "platform.h"
+
+#include <stddef.h>
+#include <stdarg.h>
+
+/* uart */
+extern int uart_putc(char ch);
+extern void uart_puts(char *s);
+
+/* printf */
+extern int  printf(const char* s, ...);
+extern void panic(char *s);
+
+#endif /* __OS_H__ */
+```
+
+**printf.c**
+
+```C
+#include "os.h"
+
+/*
+ * ref: https://github.com/cccriscv/mini-riscv-os/blob/master/05-Preemptive/lib.c
+ */
+
+static int _vsnprintf(char * out, size_t n, const char* s, va_list vl)
+{
+	int format = 0;
+	int longarg = 0;
+	size_t pos = 0;
+	for (; *s; s++) {
+		if (format) {
+			switch(*s) {
+			case 'l': {
+				longarg = 1;
+				break;
+			}
+			case 'p': {
+				longarg = 1;
+				if (out && pos < n) {
+					out[pos] = '0';
+				}
+				pos++;
+				if (out && pos < n) {
+					out[pos] = 'x';
+				}
+				pos++;
+			}
+			case 'x': {
+				long num = longarg ? va_arg(vl, long) : va_arg(vl, int);
+				int hexdigits = 2*(longarg ? sizeof(long) : sizeof(int))-1;
+				for(int i = hexdigits; i >= 0; i--) {
+					int d = (num >> (4*i)) & 0xF;
+					if (out && pos < n) {
+						out[pos] = (d < 10 ? '0'+d : 'a'+d-10);
+					}
+					pos++;
+				}
+				longarg = 0;
+				format = 0;
+				break;
+			}
+			case 'd': {
+				long num = longarg ? va_arg(vl, long) : va_arg(vl, int);
+				if (num < 0) {
+					num = -num;
+					if (out && pos < n) {
+						out[pos] = '-';
+					}
+					pos++;
+				}
+				long digits = 1;
+				for (long nn = num; nn /= 10; digits++);
+				for (int i = digits-1; i >= 0; i--) {
+					if (out && pos + i < n) {
+						out[pos + i] = '0' + (num % 10);
+					}
+					num /= 10;
+				}
+				pos += digits;
+				longarg = 0;
+				format = 0;
+				break;
+			}
+			case 's': {
+				const char* s2 = va_arg(vl, const char*);
+				while (*s2) {
+					if (out && pos < n) {
+						out[pos] = *s2;
+					}
+					pos++;
+					s2++;
+				}
+				longarg = 0;
+				format = 0;
+				break;
+			}
+			case 'c': {
+				if (out && pos < n) {
+					out[pos] = (char)va_arg(vl,int);
+				}
+				pos++;
+				longarg = 0;
+				format = 0;
+				break;
+			}
+			default:
+				break;
+			}
+		} else if (*s == '%') {
+			format = 1;
+		} else {
+			if (out && pos < n) {
+				out[pos] = *s;
+			}
+			pos++;
+		}
+    	}
+	if (out && pos < n) {
+		out[pos] = 0;
+	} else if (out && n) {
+		out[n-1] = 0;
+	}
+	return pos;
+}
+
+static char out_buf[1000]; // buffer for _vprintf()
+
+static int _vprintf(const char* s, va_list vl)
+{
+	int res = _vsnprintf(NULL, -1, s, vl);
+	if (res+1 >= sizeof(out_buf)) {
+		uart_puts("error: output string size overflow\n");
+		while(1) {}
+	}
+	_vsnprintf(out_buf, res + 1, s, vl);
+	uart_puts(out_buf);
+	return res;
+}
+
+int printf(const char* s, ...)
+{
+	int res = 0;
+	va_list vl;
+	va_start(vl, s);
+	res = _vprintf(s, vl);
+	va_end(vl);
+	return res;
+}
+
+void panic(char *s)
+{
+	printf("panic: ");
+	printf(s);
+	printf("\n");
+	while(1){};
+}
+```
+
+## 02-memanagement
+
+内存管理主要分为三类
+1:自动管理内存-栈
+2:静态内存-全局变量和局部静态变量
+3:动态管理内存-堆
+
+本节主要实现内存按页动态分配和释放
+
+**types.h**
+
+```C
+#ifndef __TYPES_H__
+#define __TYPES_H__
+
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int  uint32_t;
+typedef unsigned long long uint64_t;
+
+typedef uint32_t ptr_t;
+
+#endif /* __TYPES_H__ */
+```
+
+**os.ld**
+
+链接器脚本
+
+定义了128M的ram，起始地址位于0x80000000
+
+
+
+```C
+/*
+ * rvos.ld
+ * Linker script for outputting to RVOS
+ */
+
+/*
+ * https://sourceware.org/binutils/docs/ld/Miscellaneous-Commands.html
+ * OUTPUT_ARCH command specifies a particular output machine architecture.
+ * "riscv" is the name of the architecture for both 64-bit and 32-bit
+ * RISC-V target. We will further refine this by using -march
+ * and -mabi when calling gcc.
+ */
+OUTPUT_ARCH( "riscv" )
+
+/*
+ * https://sourceware.org/binutils/docs/ld/Entry-Point.html
+ * ENTRY command is used to set the "entry point", which is the first instruction
+ * to execute in a program.
+ * The argument of ENTRY command is a symbol name, here is "_start" which is
+ * defined in start.S.
+ */
+ENTRY( _start )
+
+/*
+ * https://sourceware.org/binutils/docs/ld/MEMORY.html
+ * The MEMORY command describes the location and size of blocks of memory in
+ * the target.
+ * The syntax for MEMORY is:
+ * MEMORY
+ * {
+ *     name [(attr)] : ORIGIN = origin, LENGTH = len
+ *     ......
+ * }
+ * Each line defines a memory region.
+ * Each memory region must have a distinct name within the MEMORY command. Here
+ * we only define one region named as "ram".
+ * The "attr" string is an optional list of attributes that specify whether to
+ * use a particular memory region for an input section which is not explicitly
+ * mapped in the linker script. Here we assign 'w' (writeable), 'x' (executable),
+ * and 'a' (allocatable). We use '!' to invert 'r' (read-only) and
+ * 'i' (initialized).
+ * The "ORIGIN" is used to set the start address of the memory region. Here we
+ * place it right at the beginning of 0x8000_0000 because this is where the
+ * QEMU-virt machine will start executing.
+ * Finally LENGTH = 128M tells the linker that we have 128 megabyte of RAM.
+ * The linker will double check this to make sure everything can fit.
+ */
+MEMORY
+{
+	ram   (wxa!ri) : ORIGIN = 0x80000000, LENGTH = 128M
+}
+
+/*
+ * https://sourceware.org/binutils/docs/ld/SECTIONS.html
+ * The SECTIONS command tells the linker how to map input sections into output
+ * sections, and how to place the output sections in memory.
+ * The format of the SECTIONS command is:
+ * SECTIONS
+ * {
+ *     sections-command
+ *     sections-command
+ *     ......
+ * }
+ *
+ * Each sections-command may of be one of the following:
+ * (1) an ENTRY command
+ * (2) a symbol assignment
+ * (3) an output section description
+ * (4) an overlay description
+ * We here only demo (2) & (3).
+ *
+ * We use PROVIDE command to define symbols.
+ * https://sourceware.org/binutils/docs/ld/PROVIDE.html
+ * The PROVIDE keyword may be used to define a symbol.
+ * The syntax is PROVIDE(symbol = expression).
+ * Such symbols as "_text_start", "_text_end" ... will be used in mem.S.
+ * Notice the period '.' tells the linker to set symbol(e.g. _text_start) to
+ * the CURRENT location ('.' = current memory location). This current memory
+ * location moves as we add things.
+ */
+SECTIONS
+{
+	/*
+	 * We are going to layout all text sections in .text output section,
+	 * starting with .text. The asterisk("*") in front of the
+	 * parentheses means to match the .text section of ANY object file.
+	 */
+	.text : {
+		PROVIDE(_text_start = .);
+		*(.text .text.*)
+		PROVIDE(_text_end = .);
+	} >ram
+
+	.rodata : {
+		PROVIDE(_rodata_start = .);
+		*(.rodata .rodata.*)
+		PROVIDE(_rodata_end = .);
+	} >ram
+
+	.data : {
+		/*
+		 * . = ALIGN(4096) tells the linker to align the current memory
+		 * location to 4096 bytes. This will insert padding bytes until
+		 * current location becomes aligned on 4096-byte boundary.
+		 * This is because our paging system's resolution is 4,096 bytes.
+		 */
+		. = ALIGN(4096);
+		PROVIDE(_data_start = .);
+		/*
+		 * sdata and data are essentially the same thing. We do not need
+		 * to distinguish sdata from data.
+		 */
+		*(.sdata .sdata.*)
+		*(.data .data.*)
+		PROVIDE(_data_end = .);
+	} >ram
+
+	.bss :{
+		/*
+		 * https://sourceware.org/binutils/docs/ld/Input-Section-Common.html
+		 * In most cases, common symbols in input files will be placed
+		 * in the ‘.bss’ section in the output file.
+		 */
+		PROVIDE(_bss_start = .);
+		*(.sbss .sbss.*)
+		*(.bss .bss.*)
+		*(COMMON)
+		PROVIDE(_bss_end = .);
+	} >ram
+
+	PROVIDE(_memory_start = ORIGIN(ram));
+	PROVIDE(_memory_end = ORIGIN(ram) + LENGTH(ram));
+
+	PROVIDE(_heap_start = _bss_end);
+	PROVIDE(_heap_size = _memory_end - _heap_start);
+}
+```
+
+**mem.S**
+
+映射链接脚本中定义的符号：
+堆内存起始地址和大小
+指令部分起始地址和终止地址
+数据部分起始地址和终止地址
+
+
+```C
+#define SIZE_PTR .word
+
+.section .rodata
+.global HEAP_START
+HEAP_START: SIZE_PTR _heap_start
+
+.global HEAP_SIZE
+HEAP_SIZE: SIZE_PTR _heap_size
+
+.global TEXT_START
+TEXT_START: SIZE_PTR _text_start
+
+.global TEXT_END
+TEXT_END: SIZE_PTR _text_end
+
+.global DATA_START
+DATA_START: SIZE_PTR _data_start
+
+.global DATA_END
+DATA_END: SIZE_PTR _data_end
+
+.global RODATA_START
+RODATA_START: SIZE_PTR _rodata_start
+
+.global RODATA_END
+RODATA_END: SIZE_PTR _rodata_end
+
+.global BSS_START
+BSS_START: SIZE_PTR _bss_start
+
+.global BSS_END
+BSS_END: SIZE_PTR _bss_end
+```
+
+**page.c**
+
+页数据结构
+
+堆的前8页用于存放页的状态，取个名字就叫页状态区吧，页状态区每个Byte表示页分配区中一个页的状态，每个Byte第0位bit表示是否已分配，第1位bit表示是否是已分配的内存块中的最后一页，一页是4kB，8页是32kB，一共可以表示32k页(32k\*4k=128M)，最多可以支持128M的堆内存
+
+```C
+/*
+ * Page Descriptor 
+ * flags:
+ * - bit 0: flag if this page is taken(allocated)
+ * - bit 1: flag if this page is the last page of the memory block allocated
+ */
+struct Page {
+	uint8_t flags;
+};
+```
+
+
+
+以下主要实现堆内存初始化
+主要做的逻辑是：将页状态区清0，这样表示页分配区所有的页都是未分配的状态；以及求出页分配区的起始地址和终止地址
+
+```C
+void page_init()
+{
+	/* 
+	 * We reserved 8 Page (8 x 4096) to hold the Page structures.
+	 * It should be enough to manage at most 128 MB (8 x 4096 x 4096) 
+	 */
+	_num_pages = (HEAP_SIZE / PAGE_SIZE) - 8;
+	printf("HEAP_START = %p, HEAP_SIZE = 0x%lx, num of pages = %d\n", HEAP_START, HEAP_SIZE, _num_pages);
+	
+	struct Page *page = (struct Page *)HEAP_START;
+	for (int i = 0; i < _num_pages; i++) {
+		_clear(page);
+		page++;	
+	}
+
+	_alloc_start = _align_page(HEAP_START + 8 * PAGE_SIZE);
+	_alloc_end = _alloc_start + (PAGE_SIZE * _num_pages);
+
+	printf("TEXT:   %p -> %p\n", TEXT_START, TEXT_END);
+	printf("RODATA: %p -> %p\n", RODATA_START, RODATA_END);
+	printf("DATA:   %p -> %p\n", DATA_START, DATA_END);
+	printf("BSS:    %p -> %p\n", BSS_START, BSS_END);
+	printf("HEAP:   %p -> %p\n", _alloc_start, _alloc_end);
+}
+```
+
+
+分配页分配区的页
+
+input需要分配的页数，分配连续的页，返回连续的页的起始地址
+
+主要逻辑：
+使用了非常基本的线性搜索，遍历页状态区，找到连续的符合要求的页数
+
+```C
+/*
+ * Allocate a memory block which is composed of contiguous physical pages
+ * - npages: the number of PAGE_SIZE pages to allocate
+ */
+void *page_alloc(int npages)
+{
+	/* Note we are searching the page descriptor bitmaps. */
+	int found = 0;
+	struct Page *page_i = (struct Page *)HEAP_START;
+	for (int i = 0; i <= (_num_pages - npages); i++) {
+		if (_is_free(page_i)) {
+			found = 1;
+			/* 
+			 * meet a free page, continue to check if following
+			 * (npages - 1) pages are also unallocated.
+			 */
+			struct Page *page_j = page_i + 1;
+			for (int j = i + 1; j < (i + npages); j++) {
+				if (!_is_free(page_j)) {
+					found = 0;
+					break;
+				}
+				page_j++;
+			}
+			/*
+			 * get a memory block which is good enough for us,
+			 * take housekeeping, then return the actual start
+			 * address of the first page of this memory block
+			 */
+			if (found) {
+				struct Page *page_k = page_i;
+				for (int k = i; k < (i + npages); k++) {
+					_set_flag(page_k, PAGE_TAKEN);
+					page_k++;
+				}
+				page_k--;
+				_set_flag(page_k, PAGE_LAST);
+				return (void *)(_alloc_start + i * PAGE_SIZE);
+			}
+		}
+		page_i++;
+	}
+	return NULL;
+}
+```
+
+释放页分配区的页
+主要逻辑：找到待释放页所在的块中的首页地址，并释放
+
+```C
+/*
+ * Free the memory block
+ * - p: start address of the memory block
+ */
+void page_free(void *p)
+{
+	/*
+	 * Assert (TBD) if p is invalid
+	 */
+	if (!p || (ptr_t)p >= _alloc_end) {
+		return;
+	}
+	/* get the first page descriptor of this memory block */
+	struct Page *page = (struct Page *)HEAP_START;
+	page += ((ptr_t)p - _alloc_start)/ PAGE_SIZE;
+	/* loop and clear all the page descriptors of the memory block */
+	while (!_is_free(page)) {
+		if (_is_last(page)) {
+			_clear(page);
+			break;
+		} else {
+			_clear(page);
+			page++;;
+		}
+	}
+}
+```
+
+总览：
+
+```C
+#include "os.h"
+
+/*
+ * Following global vars are defined in mem.S
+ */
+extern ptr_t TEXT_START;
+extern ptr_t TEXT_END;
+extern ptr_t DATA_START;
+extern ptr_t DATA_END;
+extern ptr_t RODATA_START;
+extern ptr_t RODATA_END;
+extern ptr_t BSS_START;
+extern ptr_t BSS_END;
+extern ptr_t HEAP_START;
+extern ptr_t HEAP_SIZE;
+
+/*
+ * _alloc_start points to the actual start address of heap pool
+ * _alloc_end points to the actual end address of heap pool
+ * _num_pages holds the actual max number of pages we can allocate.
+ */
+static ptr_t _alloc_start = 0;
+static ptr_t _alloc_end = 0;
+static uint32_t _num_pages = 0;
+
+#define PAGE_SIZE 4096
+#define PAGE_ORDER 12
+
+#define PAGE_TAKEN (uint8_t)(1 << 0)
+#define PAGE_LAST  (uint8_t)(1 << 1)
+
+/*
+ * Page Descriptor 
+ * flags:
+ * - bit 0: flag if this page is taken(allocated)
+ * - bit 1: flag if this page is the last page of the memory block allocated
+ */
+struct Page {
+	uint8_t flags;
+};
+
+static inline void _clear(struct Page *page)
+{
+	page->flags = 0;
+}
+
+static inline int _is_free(struct Page *page)
+{
+	if (page->flags & PAGE_TAKEN) {
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+static inline void _set_flag(struct Page *page, uint8_t flags)
+{
+	page->flags |= flags;
+}
+
+static inline int _is_last(struct Page *page)
+{
+	if (page->flags & PAGE_LAST) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
+/*
+ * align the address to the border of page(4K)
+ */
+static inline ptr_t _align_page(ptr_t address)
+{
+	ptr_t order = (1 << PAGE_ORDER) - 1;
+	return (address + order) & (~order);
+}
+
+void page_init()
+{
+	/* 
+	 * We reserved 8 Page (8 x 4096) to hold the Page structures.
+	 * It should be enough to manage at most 128 MB (8 x 4096 x 4096) 
+	 */
+	_num_pages = (HEAP_SIZE / PAGE_SIZE) - 8;
+	printf("HEAP_START = %p, HEAP_SIZE = 0x%lx, num of pages = %d\n", HEAP_START, HEAP_SIZE, _num_pages);
+	
+	struct Page *page = (struct Page *)HEAP_START;
+	for (int i = 0; i < _num_pages; i++) {
+		_clear(page);
+		page++;	
+	}
+
+	_alloc_start = _align_page(HEAP_START + 8 * PAGE_SIZE);
+	_alloc_end = _alloc_start + (PAGE_SIZE * _num_pages);
+
+	printf("TEXT:   %p -> %p\n", TEXT_START, TEXT_END);
+	printf("RODATA: %p -> %p\n", RODATA_START, RODATA_END);
+	printf("DATA:   %p -> %p\n", DATA_START, DATA_END);
+	printf("BSS:    %p -> %p\n", BSS_START, BSS_END);
+	printf("HEAP:   %p -> %p\n", _alloc_start, _alloc_end);
+}
+
+/*
+ * Allocate a memory block which is composed of contiguous physical pages
+ * - npages: the number of PAGE_SIZE pages to allocate
+ */
+void *page_alloc(int npages)
+{
+	/* Note we are searching the page descriptor bitmaps. */
+	int found = 0;
+	struct Page *page_i = (struct Page *)HEAP_START;
+	for (int i = 0; i <= (_num_pages - npages); i++) {
+		if (_is_free(page_i)) {
+			found = 1;
+			/* 
+			 * meet a free page, continue to check if following
+			 * (npages - 1) pages are also unallocated.
+			 */
+			struct Page *page_j = page_i + 1;
+			for (int j = i + 1; j < (i + npages); j++) {
+				if (!_is_free(page_j)) {
+					found = 0;
+					break;
+				}
+				page_j++;
+			}
+			/*
+			 * get a memory block which is good enough for us,
+			 * take housekeeping, then return the actual start
+			 * address of the first page of this memory block
+			 */
+			if (found) {
+				struct Page *page_k = page_i;
+				for (int k = i; k < (i + npages); k++) {
+					_set_flag(page_k, PAGE_TAKEN);
+					page_k++;
+				}
+				page_k--;
+				_set_flag(page_k, PAGE_LAST);
+				return (void *)(_alloc_start + i * PAGE_SIZE);
+			}
+		}
+		page_i++;
+	}
+	return NULL;
+}
+
+/*
+ * Free the memory block
+ * - p: start address of the memory block
+ */
+void page_free(void *p)
+{
+	/*
+	 * Assert (TBD) if p is invalid
+	 */
+	if (!p || (ptr_t)p >= _alloc_end) {
+		return;
+	}
+	/* get the first page descriptor of this memory block */
+	struct Page *page = (struct Page *)HEAP_START;
+	page += ((ptr_t)p - _alloc_start)/ PAGE_SIZE;
+	/* loop and clear all the page descriptors of the memory block */
+	while (!_is_free(page)) {
+		if (_is_last(page)) {
+			_clear(page);
+			break;
+		} else {
+			_clear(page);
+			page++;;
+		}
+	}
+}
+
+void page_test()
+{
+	void *p = page_alloc(2);
+	printf("p = %p\n", p);
+	//page_free(p);
+
+	void *p2 = page_alloc(7);
+	printf("p2 = %p\n", p2);
+	page_free(p2);
+
+	void *p3 = page_alloc(4);
+	printf("p3 = %p\n", p3);
+}
+```
