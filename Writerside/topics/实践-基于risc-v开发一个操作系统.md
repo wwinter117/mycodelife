@@ -1015,14 +1015,34 @@ QEMU: Terminated
 
 ### 03-contextswitch
 
-本节实现多任务处理
+本节关于上下文切换，首先实现单任务的调度，下一节实现协作式多任务调度
+
+**types.h**
+
+```C
+#ifndef __TYPES_H__
+#define __TYPES_H__
+
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int  uint32_t;
+typedef unsigned long long uint64_t;
+
+/*
+ * Register Width
+ */
+typedef uint32_t reg_t;
+typedef uint32_t ptr_t;
+
+#endif /* __TYPES_H__ */
+```
+
 
 **定义上下文**
 
 数据结构如下：
 
-每个任务的上下文就是存在寄存器中的内容，当切换切换任务运行时，需要保存当前任务的上下文内容，
-并且恢复将要运行的任务的上下文
+每个任务的上下文就是存在寄存器中的内容，当切换任务运行时，需要保存当前任务的上下文内容，并且恢复将要运行的任务的上下文
 
 ```C
 /* task management */
@@ -1064,9 +1084,15 @@ struct context {
 
 **sched.c**
 
-实现调度初始化：
+task_stack：为每个任务分配1024字节的栈空间（目前只有一个任务）
 
-将0写入mscratch寄存器
+ctx_task：当前运行任务的上下文
+
+sched_init：实现调度初始化，将0写入mscratch寄存器（用于标识是第一次调度），准备当前将要运行的任务的上下文，即sp指针指向一块分配的栈空间，ra指针指向将要运行任务的地址
+
+scheule：开始任务调度，调用switch_to，把将要运行的任务的上下文地址放入a0寄存器
+
+switch_to：首次调度，将a0寄存器中存的上下文地址中的上下文信息恢复到寄存器中，然后ret程序自动跳转到初始化时放在ra寄存器中的地址开始执行
 
 
 
