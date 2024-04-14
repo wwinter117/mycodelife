@@ -1380,3 +1380,336 @@ void task_delay(volatile int count)
 	while (count--);
 }
 ```
+
+### 05-traps
+
+异常控制流程：当发生中断或异常的时候，cpu跳转到中断处理程序进行异常处理，处理完毕后返回到发生中断的指令的位置，
+或者返回到发生中断的指令的下一条指令的位置
+
+自定义一个中断处理函数，当发生中断或异常的时候，跳转到此函数进行处理，处理完毕之后返回
+
+只需要将中断处理函数的地址写进mtvec寄存器，当系统发生中断或异常，会跳转到此寄存器中的地址运行指令，
+在中断处理程序中可以提前将中断处理完成之后的指令地址写入mepc寄存器，然后调用mret，cpu会架构mepc中的值复制到pc，
+从而达到中断返回的效果
+
+mepc：中断发生时，cpu将发生trap的指令地址写入此寄存器，中断返回时(mret)，cpu将此寄存器中的值写回pc
+mtvec：存放中断处理程序的基地址，发生中断时，cpu将此地址写入pc
+mcause：当发生中断时，cpu将中断或异常的类型信息写入此寄存器
+mtval：发生exception时，cpu将相关附加信息写入此寄存器
+mstatus：用于跟踪和控制cpu的当前操作状态，比如关闭和打开全局中断
+
+操作系统进行trap初始化只需要将写好的中断处理程序的地址写入mtvec
+
+如何写中断处理程序：对mcause进行switch-case，对不同的trap进行对应的处理
+
+```C
+
+.text
+
+# interrupts and exceptions while in machine mode come here.
+.globl trap_vector
+# the trap vector base address must always be aligned on a 4-byte boundary
+.balign 4
+trap_vector:
+	# save context(registers).
+	csrrw	t6, mscratch, t6	# swap t6 and mscratch
+	reg_save t6
+
+	# Save the actual t6 register, which we swapped into
+	# mscratch
+	mv	t5, t6		# t5 points to the context of current task
+	csrr	t6, mscratch	# read t6 back from mscratch
+	sw	t6, 120(t5)	# save t6 with t5 as base
+
+	# Restore the context pointer into mscratch
+	csrw	mscratch, t5
+
+	# call the C trap handler in trap.c
+	csrr	a0, mepc
+	csrr	a1, mcause
+	call	trap_handler
+
+	# trap_handler will return the return address via a0.
+	csrw	mepc, a0
+
+	# restore context(registers).
+	csrr	t6, mscratch
+	reg_restore t6
+
+	# return to whatever we were doing before trap.
+	mret
+```
+
+**trap.c**
+
+```C
+#include "os.h"
+
+extern void trap_vector(void);
+
+void trap_init()
+{
+	/*
+	 * set the trap-vector base-address for machine-mode
+	 */
+	w_mtvec((reg_t)trap_vector);
+}
+
+reg_t trap_handler(reg_t epc, reg_t cause)
+{
+	reg_t return_pc = epc;
+	reg_t cause_code = cause & 0xfff;
+	
+	if (cause & 0x80000000) {
+		/* Asynchronous trap - interrupt */
+		switch (cause_code) {
+		case 3:
+			uart_puts("software interruption!\n");
+			break;
+		case 7:
+			uart_puts("timer interruption!\n");
+			break;
+		case 11:
+			uart_puts("external interruption!\n");
+			break;
+		default:
+			uart_puts("unknown async exception!\n");
+			break;
+		}
+	} else {
+        /* Asynchronous trap - exception */
+        switch (cause_code) {
+            case 7:
+                uart_puts("store/AMO address misaligned\n");
+                return_pc += 4;
+                break;
+        }
+		/* Synchronous trap - exception */
+//		printf("Sync exceptions!, code = %d\n", cause_code);
+//		panic("OOPS! What can I do!");
+//		return_pc += 4;
+	}
+
+	return return_pc;
+}
+
+void trap_test()
+{
+	/*
+	 * Synchronous exception code = 7
+	 * Store/AMO access fault
+	 */
+	*(int *)0x00000000 = 100;
+
+	/*
+	 * Synchronous exception code = 5
+	 * Load access fault
+	 */
+	//int a = *(int *)0x00000000;
+
+	uart_puts("Yeah! I'm return back from trap!\n");
+}
+```
+
+### 05-external-interrupt
+
+cpu有三个关于引脚用于接受三种中断信息，软件中断，定时器中断和外部中断
+
+```C
+/* Machine-mode Interrupt Enable */
+#define MIE_MEIE (1 << 11) // external
+#define MIE_MTIE (1 << 7)  // timer
+#define MIE_MSIE (1 << 3)  // software
+```
+
+**plic.c**
+
+实现平台级别中断控制器(Platform-Level Interrupt Controller)，可通过配置
+每个中断源的优先级、使能、阈值等来统一控制所有的中断信息
+
+plic中有许多寄存器，包括：
++ 64个优先级寄存器（每个中断源一个）
++ 2个Pending寄存器，每一个bit对应于一个中断源，一共有32*2=64个中断源，1-有中断，0-无中断
++ 16个Enable寄存器，每个hart2个，8个hart一共有16个，每个bit对应一个中断源，负责开关每个hart上的中断源
++ 8个Threshold寄存器，每个hart1个，用于设置中断优先级的阈值
++ 8个Claim/Complete寄存器，每个hart1个，读操作成功发生后会清除对应的Pending位，写操作完成后通知PLIC中断处理结束
+
+以下配置了uart的中断信息（hart0）
+
+uart外设的Priority寄存器
+uart外设的Enable寄存器
+uart外设的MTHRESHOLD寄存器
+设置mie和mstatus寄存器，用于打开hart0的外部中断和全局中断
+
+```C
+#include "os.h"
+
+void plic_init(void)
+{
+	int hart = r_tp();
+  
+	/* 
+	 * Set priority for UART0.
+	 *
+	 * Each PLIC interrupt source can be assigned a priority by writing 
+	 * to its 32-bit memory-mapped priority register.
+	 * The QEMU-virt (the same as FU540-C000) supports 7 levels of priority. 
+	 * A priority value of 0 is reserved to mean "never interrupt" and 
+	 * effectively disables the interrupt. 
+	 * Priority 1 is the lowest active priority, and priority 7 is the highest. 
+	 * Ties between global interrupts of the same priority are broken by 
+	 * the Interrupt ID; interrupts with the lowest ID have the highest 
+	 * effective priority.
+	 */
+	*(uint32_t*)PLIC_PRIORITY(UART0_IRQ) = 1;
+ 
+	/*
+	 * Enable UART0
+	 *
+	 * Each global interrupt can be enabled by setting the corresponding 
+	 * bit in the enables registers.
+	 */
+	*(uint32_t*)PLIC_MENABLE(hart, UART0_IRQ)= (1 << (UART0_IRQ % 32));
+
+	/* 
+	 * Set priority threshold for UART0.
+	 *
+	 * PLIC will mask all interrupts of a priority less than or equal to threshold.
+	 * Maximum threshold is 7.
+	 * For example, a threshold value of zero permits all interrupts with
+	 * non-zero priority, whereas a value of 7 masks all interrupts.
+	 * Notice, the threshold is global for PLIC, not for each interrupt source.
+	 */
+	*(uint32_t*)PLIC_MTHRESHOLD(hart) = 0;
+
+	/* enable machine-mode external interrupts. */
+	w_mie(r_mie() | MIE_MEIE);
+
+	/* enable machine-mode global interrupts. */
+	w_mstatus(r_mstatus() | MSTATUS_MIE);
+}
+
+/* 
+ * DESCRIPTION:
+ *	Query the PLIC what interrupt we should serve.
+ *	Perform an interrupt claim by reading the claim register, which
+ *	returns the ID of the highest-priority pending interrupt or zero if there 
+ *	is no pending interrupt. 
+ *	A successful claim also atomically clears the corresponding pending bit
+ *	on the interrupt source.
+ * RETURN VALUE:
+ *	the ID of the highest-priority pending interrupt or zero if there 
+ *	is no pending interrupt.
+ */
+int plic_claim(void)
+{
+	int hart = r_tp();
+	int irq = *(uint32_t*)PLIC_MCLAIM(hart);
+	return irq;
+}
+
+/* 
+ * DESCRIPTION:
+  *	Writing the interrupt ID it received from the claim (irq) to the 
+ *	complete register would signal the PLIC we've served this IRQ. 
+ *	The PLIC does not check whether the completion ID is the same as the 
+ *	last claim ID for that target. If the completion ID does not match an 
+ *	interrupt source that is currently enabled for the target, the completion
+ *	is silently ignored.
+ * RETURN VALUE: none
+ */
+void plic_complete(int irq)
+{
+	int hart = r_tp();
+	*(uint32_t*)PLIC_MCOMPLETE(hart) = irq;
+}
+```
+
+**trap.c**
+
+当发生外部中断时，通过plic_claim()来获取当前cpu的发生的最高级别的中断源ID，进行相应的处理，
+处理成功之后回清除对应的Pending位
+调用plic_complete()，来通知plic当前中断已经处理完毕，可以继续处理后续的中断
+
+
+
+```C
+#include "os.h"
+
+extern void trap_vector(void);
+extern void uart_isr(void);
+
+void trap_init()
+{
+	/*
+	 * set the trap-vector base-address for machine-mode
+	 */
+	w_mtvec((reg_t)trap_vector);
+}
+
+void external_interrupt_handler()
+{
+	int irq = plic_claim();
+
+	if (irq == UART0_IRQ){
+      		uart_isr();
+	} else if (irq) {
+		printf("unexpected interrupt irq = %d\n", irq);
+	}
+	
+	if (irq) {
+		plic_complete(irq);
+	}
+}
+
+reg_t trap_handler(reg_t epc, reg_t cause)
+{
+	reg_t return_pc = epc;
+	reg_t cause_code = cause & 0xfff;
+	
+	if (cause & 0x80000000) {
+		/* Asynchronous trap - interrupt */
+		switch (cause_code) {
+		case 3:
+			uart_puts("software interruption!\n");
+			break;
+		case 7:
+			uart_puts("timer interruption!\n");
+			break;
+		case 11:
+			uart_puts("external interruption!\n");
+			external_interrupt_handler();
+			break;
+		default:
+			uart_puts("unknown async exception!\n");
+			break;
+		}
+	} else {
+		/* Synchronous trap - exception */
+		printf("Sync exceptions!, code = %d\n", cause_code);
+		panic("OOPS! What can I do!");
+		//return_pc += 4;
+	}
+
+	return return_pc;
+}
+
+void trap_test()
+{
+	/*
+	 * Synchronous exception code = 7
+	 * Store/AMO access fault
+	 */
+	*(int *)0x00000000 = 100;
+
+	/*
+	 * Synchronous exception code = 5
+	 * Load access fault
+	 */
+	//int a = *(int *)0x00000000;
+
+	uart_puts("Yeah! I'm return back from trap!\n");
+}
+```
+
+
