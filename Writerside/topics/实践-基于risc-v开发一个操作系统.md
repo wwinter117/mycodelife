@@ -1511,7 +1511,7 @@ void trap_test()
 }
 ```
 
-### 05-external-interrupt
+### 06-external-interrupt
 
 cpu有三个关于引脚用于接受三种中断信息，软件中断，定时器中断和外部中断
 
@@ -1712,4 +1712,282 @@ void trap_test()
 }
 ```
 
+### 07-hwtimer
+
+本节实现另一种中断方式，定时器中断，对应的码值是7，主要逻辑只是每次将CLINT_MTIMECMP寄存器加上一个固定值，这样每次固定的时钟都会产生一个中断信号
+
+```C
+reg_t trap_handler(reg_t epc, reg_t cause)
+{
+	reg_t return_pc = epc;
+	reg_t cause_code = cause & MCAUSE_MASK_ECODE;
+	
+	if (cause & MCAUSE_MASK_INTERRUPT) {
+		/* Asynchronous trap - interrupt */
+		switch (cause_code) {
+		case 3:
+			uart_puts("software interruption!\n");
+			break;
+		case 7:
+			uart_puts("timer interruption!\n");
+			timer_handler();
+			break;
+		case 11:
+			uart_puts("external interruption!\n");
+			external_interrupt_handler();
+			break;
+		default:
+			printf("Unknown async exception! Code = %ld\n", cause_code);
+			break;
+		}
+	} else {
+		/* Synchronous trap - exception */
+		printf("Sync exceptions! Code = %ld\n", cause_code);
+		panic("OOPS! What can I do!");
+		//return_pc += 4;
+	}
+
+	return return_pc;
+}
+```
+
+```C
+#include "os.h"
+
+/* interval ~= 1s */
+#define TIMER_INTERVAL CLINT_TIMEBASE_FREQ
+
+static uint32_t _tick = 0;
+
+/* load timer interval(in ticks) for next timer interrupt.*/
+void timer_load(int interval)
+{
+	/* each CPU has a separate source of timer interrupts. */
+	int id = r_mhartid();
+	
+	*(uint64_t*)CLINT_MTIMECMP(id) = *(uint64_t*)CLINT_MTIME + interval;
+}
+
+void timer_init()
+{
+	/*
+	 * On reset, mtime is cleared to zero, but the mtimecmp registers 
+	 * are not reset. So we have to init the mtimecmp manually.
+	 */
+	timer_load(TIMER_INTERVAL);
+
+	/* enable machine-mode timer interrupts. */
+	w_mie(r_mie() | MIE_MTIE);
+
+	/* enable machine-mode global interrupts. */
+	w_mstatus(r_mstatus() | MSTATUS_MIE);
+}
+
+void timer_handler() 
+{
+	_tick++;
+	printf("tick: %d\n", _tick);
+
+	timer_load(TIMER_INTERVAL);
+}
+```
+
+### 08-preemptive
+
+本节利用定时器中断来实现抢占式任务调度，并且利用软件中断来兼容协作式任务调度
+
+```C
+.text
+
+# interrupts and exceptions while in machine mode come here.
+.globl trap_vector
+# the trap vector base address must always be aligned on a 4-byte boundary
+.balign 4
+trap_vector:
+	# save context(registers).
+	csrrw	t6, mscratch, t6	# swap t6 and mscratch
+	reg_save t6
+
+	# Save the actual t6 register, which we swapped into
+	# mscratch
+	mv	t5, t6			# t5 points to the context of current task
+	csrr	t6, mscratch		# read t6 back from mscratch
+	STORE	t6, 30*SIZE_REG(t5)	# save t6 with t5 as base
+
+	# save mepc to context of current task
+	csrr	a0, mepc
+	STORE	a0, 31*SIZE_REG(t5)
+
+	# Restore the context pointer into mscratch
+	csrw	mscratch, t5
+
+	# call the C trap handler in trap.c
+	csrr	a0, mepc
+	csrr	a1, mcause
+	call	trap_handler
+
+	# trap_handler will return the return address via a0.
+	csrw	mepc, a0
+
+	# restore context(registers).
+	csrr	t6, mscratch
+	reg_restore t6
+
+	# return to whatever we were doing before trap.
+	mret
+
+# void switch_to(struct context *next);
+# a0: pointer to the context of the next task
+.globl switch_to
+.balign 4
+switch_to:
+	# switch mscratch to point to the context of the next task
+	csrw	mscratch, a0
+	# set mepc to the pc of the next task
+	LOAD	a1, 31*SIZE_REG(a0)
+	csrw	mepc, a1
+
+	# Restore all GP registers
+	# Use t6 to point to the context of the new task
+	mv	t6, a0
+	reg_restore t6
+
+	# Do actual context switching.
+	# Notice this will enable global interrupt
+	mret
+
+.end
+
+```
+
+```C
+#include "os.h"
+
+extern void schedule(void);
+
+/* interval ~= 1s */
+#define TIMER_INTERVAL CLINT_TIMEBASE_FREQ
+
+static uint32_t _tick = 0;
+
+/* load timer interval(in ticks) for next timer interrupt.*/
+void timer_load(int interval)
+{
+	/* each CPU has a separate source of timer interrupts. */
+	int id = r_mhartid();
+	
+	*(uint64_t*)CLINT_MTIMECMP(id) = *(uint64_t*)CLINT_MTIME + interval;
+}
+
+void timer_init()
+{
+	/*
+	 * On reset, mtime is cleared to zero, but the mtimecmp registers 
+	 * are not reset. So we have to init the mtimecmp manually.
+	 */
+	timer_load(TIMER_INTERVAL);
+
+	/* enable machine-mode timer interrupts. */
+	w_mie(r_mie() | MIE_MTIE);
+}
+
+void timer_handler() 
+{
+	_tick++;
+	printf("tick: %d\n", _tick);
+
+	timer_load(TIMER_INTERVAL);
+
+	schedule();
+}
+```
+
+```C
+#include "os.h"
+
+/* defined in entry.S */
+extern void switch_to(struct context *next);
+
+#define MAX_TASKS 10
+#define STACK_SIZE 1024
+/*
+ * In the standard RISC-V calling convention, the stack pointer sp
+ * is always 16-byte aligned.
+ */
+uint8_t __attribute__((aligned(16))) task_stack[MAX_TASKS][STACK_SIZE];
+struct context ctx_tasks[MAX_TASKS];
+
+/*
+ * _top is used to mark the max available position of ctx_tasks
+ * _current is used to point to the context of current task
+ */
+static int _top = 0;
+static int _current = -1;
+
+void sched_init()
+{
+	w_mscratch(0);
+
+	/* enable machine-mode software interrupts. */
+	w_mie(r_mie() | MIE_MSIE);
+}
+
+/*
+ * implment a simple cycle FIFO schedular
+ */
+void schedule()
+{
+	if (_top <= 0) {
+		panic("Num of task should be greater than zero!");
+		return;
+	}
+
+	_current = (_current + 1) % _top;
+	struct context *next = &(ctx_tasks[_current]);
+	switch_to(next);
+}
+
+/*
+ * DESCRIPTION
+ * 	Create a task.
+ * 	- start_routin: task routine entry
+ * RETURN VALUE
+ * 	0: success
+ * 	-1: if error occured
+ */
+int task_create(void (*start_routin)(void))
+{
+	if (_top < MAX_TASKS) {
+		ctx_tasks[_top].sp = (reg_t) &task_stack[_top][STACK_SIZE];
+		ctx_tasks[_top].pc = (reg_t) start_routin;
+		_top++;
+		return 0;
+	} else {
+		return -1;
+	}
+}
+
+/*
+ * DESCRIPTION
+ * 	task_yield()  causes the calling task to relinquish the CPU and a new 
+ * 	task gets to run.
+ */
+void task_yield()
+{
+	/* trigger a machine-level software interrupt */
+	int id = r_mhartid();
+	*(uint32_t*)CLINT_MSIP(id) = 1;
+}
+
+/*
+ * a very rough implementaion, just to consume the cpu
+ */
+void task_delay(volatile int count)
+{
+	count *= 50000;
+	while (count--);
+}
+```
+
+### 09-lock
 
