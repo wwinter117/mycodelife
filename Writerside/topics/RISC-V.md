@@ -4,9 +4,9 @@
 
 模块化的ISA，以RV32I为基础，运行一个完整的软件栈，且稳定不变；除此之外还有其他可选的指令集，比如：RV32M，RV32F，RV32D，或者以上三个指令集的合集RV32MFD
 
-# RV32I 基础整数指令集
+# 基础整数指令集
 
-## RV32I 指令格式
+## 指令格式
 
 一共有6种指令格式：
 - R-typy：寄存器-寄存器操作
@@ -27,19 +27,17 @@ rv32i指令分成以下几种：
 - 访存
 - 跳转
 
-![[IMG_1970.jpeg]]
+![](IMG_1970.jpeg)
+![](IMG_1971.jpeg)
 
-![[IMG_1971.jpeg]]
-
-
-## RV32I 寄存器
+## 寄存器
 
 32个寄存器
 
-![[IMG_1972.jpeg]]
+![](IMG_1972.jpeg)
 
 
-## RV32I 算逻
+## 算逻
 
 算术(add,sub)、逻辑(and,or,xor)、移位(sll,srl,sra)
 
@@ -55,36 +53,35 @@ xor
 xori
 
 sll
-slli 
+slli
 srl
 srli
-sra 
-srai 
+sra
+srai
 
 
-## RV32I 访存
+## 访存
 
 lw
 sw
 
 lb
-lbu 
-lh 
-lhu 
+lbu
+lh
+lhu
 
 sb
 sh
 
-## RV32I 跳转
+## 跳转
 
 beq
 bne
-bgt 
-blt 
+bgt
+blt
 
-betu 
-bltu 
+betu
+bltu
 
-
-jal 
+jal
 jalr 

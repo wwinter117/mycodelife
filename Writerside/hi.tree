@@ -25,5 +25,6 @@
     <toc-element topic="人工智能.md"/>
     <toc-element topic="语言.md">
         <toc-element topic="汇编.md"/>
+        <toc-element topic="RISC-V.md"/>
     </toc-element>
 </instance-profile>
