@@ -8,15 +8,15 @@
 
 ## 指令格式
 
-一共有6种指令格式：
-- R-typy：寄存器-寄存器操作
+rv32i一共有6种指令格式：
+- R-type：寄存器-寄存器操作
 - I-type：短立即数和访存load操作
 - S-type：访存store操作
 - B-type：条件跳转
 - U-type：长立即数
 - J-type：无条件跳转
 
-特点：
+rv32i特点：
 - 固定长度为32位
 - 提供3个寄存器作为操作
 - 每条指令中将要操作的寄存器在同一位置，因此在进行指令解码之前就可以访问寄存器
@@ -93,6 +93,19 @@ bltu
 
 jal
 jalr 
+
+## 其他
+
+csrrc
+csrrs
+csrrw
+csrci
+csrsi
+csrwi
+
+ecall
+ebreak
+fence
 
 # RISC-V汇编
 
