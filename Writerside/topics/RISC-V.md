@@ -94,6 +94,25 @@ bltu
 jal
 jalr 
 
+`jal rd off`
+实现无条件跳转
+pc+4结果保存到rd，然后pc=pc+off，实现跳转
+
+`jalr rd rs1 off`
+实现基于基地址的偏移跳转
+pc+4结果保存到rd，然后pc=rs1+off，实现跳转
+
+riscv中通常用ra寄存器作为`link register`保存下一条指令的地址
+
+riscv中的call和ret使用以上两条指令实现，约定ra作为链接寄存器rd
+
+call是一个宏
+call func等价于jal ra func
+call t0等价于jalr ra t0 0
+
+ret也是一个宏
+ret等价于jalr x0 ra 0
+
 ## 其他
 
 csrrc
@@ -273,4 +292,38 @@ RV32F RV32D
 RV32A
 
 ![[IMG_1983.jpeg]]
+
+## 特权架构
+
+以上指令都是实现通用计算，可以运行在用户模式，本节介绍两种权限级别更高的两种模式，相比于用户模式，增加了处理中断和执行io等额外功能
+
+- 监管者模式
+- 机器模式
+
+嵌入式系统运行时和操作系统使用以上新的模式来响应外部事件，比如说网络数据包的到达；实现多任务处理和任务间隔离；抽象和虚拟化硬件资源等等
+
+![[IMG_1999.jpeg]]
+相关控制寄存器
+
+![[IMG_2001.jpeg]]
+
+
+### 机器模式
+
+**机器模式下相关寄存器**
+
+- mtvec
+- mepc
+- mcause
+- mie
+- mip
+- mtval
+- mscratch
+- mstatus
+
+![[IMG_2002.jpeg]]
+
+
+但一个hart发生异常时，硬件自动发生以下状态转换：
+
 
