@@ -335,13 +335,6 @@ $ $
 #include "../user/user.h"
 #include "../kernel/param.h"
 
-void clean_buf(char *buf) {
-    while (*buf != '\0') {
-        *buf = '\0';
-        buf++;
-    }
-}
-
 // echo qxs asd okj | xargs echo hi ==> hi qxs\n hi asd
 int
 main(int argc, char *argv[]) {
@@ -374,7 +367,6 @@ main(int argc, char *argv[]) {
                     exit(1);
                 } else if (pid > 0) {
                     wait(0);
-                    clean_buf(buf);
                     i = 0;
                 } else {
                     fprintf(2, "fork failed\n");
