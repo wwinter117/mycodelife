@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE instance-profile
+        SYSTEM "https://resources.jetbrains.com/writerside/1.0/product-profile.dtd">
+
+<instance-profile id="hi"
+                 name="Computer"
+                 start-page="Overview.md">
+
+    <toc-element topic="Overview.md"/>
+    <toc-element topic="计算机理论.md">
+        <toc-element topic="算法理论.md"/>
+        <toc-element topic="计算机程序的构造与解释.md"/>
+    </toc-element>
+    <toc-element topic="软件开发.md">
+        <toc-element topic="系统软件.md">
+            <toc-element topic="操作系统.md">
+                <toc-element topic="文件系统.md"/>
+                <toc-element topic="xv6-labs.md">
+                </toc-element>
+                <toc-element topic="实践-基于risc-v开发一个操作系统.md"/>
+            </toc-element>
+            <toc-element topic="编译器，链接器.md"/>
+        </toc-element>
+        <toc-element topic="应用软件.md"/>
+        <toc-element topic="设计模式.md"/>
+    </toc-element>
+    <toc-element topic="计算机网络与安全.md"/>
+    <toc-element topic="硬件系统.md"/>
+    <toc-element topic="数据科学与分析.md"/>
+    <toc-element topic="人工智能.md"/>
+    <toc-element topic="语言.md">
+        <toc-element topic="汇编.md"/>
+        <toc-element topic="RISC-V.md"/>
+    </toc-element>
+</instance-profile>
